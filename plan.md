@@ -14,17 +14,6 @@ DeployBench is a web app where you pick a vision model, we benchmark it across 4
 
 ---
 
-## Context
-
-- **Hackathon:** HackIllinois 2026, Feb 27 – Mar 1
-- **Team size:** 3 people
-- **Time remaining:** ~30 hours
-- **Tracks:** Modal "Best AI Inference" track + HackVoyagers (startup pitch)
-- **Compute:** Modal serverless GPUs, $250 free credits (code VVN-YQS-E55), use T4 GPUs
-- **Demo format:** Science fair showcase (judges walk up, need to see value in 30 seconds) + 3-min video + potential 7-min Shark Tank pitch
-
----
-
 ## Architecture Overview
 
 ```
