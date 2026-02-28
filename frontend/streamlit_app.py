@@ -28,7 +28,7 @@ with st.sidebar:
         disabled=mock_mode,
     )
     st.divider()
-    st.caption("DeployBench — HackIllinois 2026")
+    st.caption("DeployBench - HackIllinois 2026")
 
 # ---------------------------------------------------------------------------
 # Mock data (used when mock_mode is True)
