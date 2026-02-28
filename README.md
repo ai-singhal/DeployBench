@@ -1,92 +1,59 @@
 # DeployBench
 
-Benchmark multiple deployment configs (FP32, FP16, INT8, ONNX) and compare cost/latency/accuracy in Streamlit.
+DeployBench benchmarks vision model optimization configs in parallel on Modal and recommends a production deployment path.
 
-## 1) Use Python 3.11 (local)
+## What it now supports
 
-This project should run on Python 3.11 to avoid type-hint/runtime compatibility issues.
+- Upload `.pt` checkpoints (max 500MB) or use gallery models.
+- Job-based API with polling (`/v1/jobs`, `/v1/jobs/{id}`).
+- 4-lane optimization race: `FP32`, `FP16`, `INT8`, `ONNX_FP16`.
+- Upload-mode lanes execute in Modal Sandboxes (gallery lanes use Functions).
+- Live recommendation with cost/speed/quality tradeoff.
+- Per-lane GPU telemetry: utilization avg/p95/peak, memory usage, and power draw.
+- Preview inference per config.
+- One-click deployment to shared authenticated inference gateway.
+
+## Local setup
 
 ```bash
-rm -rf .venv
-/Users/manningwu/miniconda3/envs/chatbot/bin/python -m venv .venv
+python -m venv .venv
 source .venv/bin/activate
-python --version
 pip install -r requirements.txt
 ```
 
-Expected version:
-
-```bash
-Python 3.11.x
-```
-
-## 2) Deploy backend on Modal
-
-From the repo root:
+## Deploy backend on Modal
 
 ```bash
 source .venv/bin/activate
 modal deploy app.py
 ```
 
-The backend endpoint for function `benchmark` is typically this format:
+Main API endpoint is the `api_app` ASGI function URL, typically:
 
 ```text
-https://<workspace>--deploybench-benchmark.modal.run
+https://<workspace>--deploybench-api-app.modal.run
 ```
 
-For your workspace, use:
-
-```text
-https://manningwu07--deploybench-benchmark.modal.run
-```
-
-## 3) Run frontend and connect to backend
+## Run frontend
 
 ```bash
 source .venv/bin/activate
 streamlit run frontend/streamlit_app.py
 ```
 
-In the Streamlit sidebar, set **Modal endpoint URL** to:
+In the sidebar, set the base API URL to your deployed Modal URL.
 
-```text
-https://manningwu07--deploybench-benchmark.modal.run
-```
+## API routes
 
-You can also use the explicit benchmark path if needed:
+- `POST /v1/jobs`
+- `GET /v1/jobs/{job_id}`
+- `POST /v1/jobs/{job_id}/preview`
+- `POST /v1/jobs/{job_id}/deploy`
+- `POST /v1/infer/{deployment_id}`
 
-```text
-https://manningwu07--deploybench-benchmark.modal.run/benchmark
-```
+## Data volumes
 
-## 4) Auto-detect endpoint URL
+- `deploybench-data`: eval dataset for benchmarking.
+- `deploybench-artifacts`: jobs, uploaded models, lane outputs, deployments.
 
-The frontend now auto-fills **Modal endpoint URL** using your active Modal profile in `~/.modal.toml`.
-For your current login, this resolves to:
-
-```text
-https://manningwu07--deploybench-benchmark.modal.run
-```
-
-You can override auto-detection with:
-
-```bash
-export DEPLOYBENCH_MODAL_ENDPOINT_URL="https://your-custom-endpoint.modal.run"
-```
-
-## 5) If you still see Python 3.9 errors
-
-That means Streamlit was launched outside your project `.venv`.
-
-Use:
-
-```bash
-source .venv/bin/activate
-which python
-python --version
-which streamlit
-streamlit run frontend/streamlit_app.py
-```
-
-`which python` and `which streamlit` should both point to `.venv/bin/...`.
+Use `setup_volume.py` once to populate `deploybench-data`.

@@ -1,4 +1,6 @@
 modal
+fastapi[standard]
+python-multipart
 ultralytics
 torch
 torchvision

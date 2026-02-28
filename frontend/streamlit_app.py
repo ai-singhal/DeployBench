@@ -1,23 +1,23 @@
-"""
-DeployBench — Streamlit frontend.
-
-Run locally:   streamlit run frontend/streamlit_app.py
-Deploy on Modal: see app.py for the @modal.asgi_app() wrapper.
-"""
+"""DeployBench Streamlit frontend for job-based API workflow."""
 
 from __future__ import annotations
 
 import os
 import re
+import time
 from pathlib import Path
-import streamlit as st
-import requests
-import plotly.graph_objects as go
+from typing import Any
 from urllib.parse import urlparse
 
+import requests
+import streamlit as st
+
+
+# ---------------------------------------------------------------------------
+# Endpoint helpers
+# ---------------------------------------------------------------------------
 
 def _detect_modal_workspace() -> str | None:
-    """Infer Modal workspace/login from env or local Modal config."""
     env_workspace = (
         os.getenv("MODAL_WORKSPACE")
         or os.getenv("MODAL_PROFILE")
@@ -44,309 +44,394 @@ def _detect_modal_workspace() -> str | None:
     return None
 
 
+
 def _default_endpoint_url() -> str:
-    """Return best default endpoint, preferring explicit env override."""
     explicit_url = os.getenv("DEPLOYBENCH_MODAL_ENDPOINT_URL")
     if explicit_url:
-        return explicit_url.strip()
+        return explicit_url.strip().rstrip("/")
 
     workspace = _detect_modal_workspace()
     if workspace:
-        return f"https://{workspace}--deploybench-benchmark.modal.run"
+        return f"https://{workspace}--deploybench-api-app.modal.run"
     return "https://your-modal-endpoint.modal.run"
 
+
+
+def _normalize_base_url(raw: str) -> str:
+    value = (raw or "").strip().rstrip("/")
+    if not value:
+        raise ValueError("Set Modal endpoint URL in sidebar")
+
+    parsed = urlparse(value)
+    if not parsed.scheme:
+        value = f"https://{value}"
+    return value.rstrip("/")
+
+
+
+def _api_url(base: str, path: str) -> str:
+    return f"{base}{path}"
+
+
+def _trigger_rerun() -> None:
+    """Streamlit rerun compatibility across versions."""
+    rerun_fn = getattr(st, "rerun", None)
+    if callable(rerun_fn):
+        rerun_fn()
+        return
+
+    legacy_fn = getattr(st, "experimental_rerun", None)
+    if callable(legacy_fn):
+        legacy_fn()
+        return
+
+    raise RuntimeError("Your Streamlit version does not support rerun APIs.")
+
+
+def _format_http_error(exc: Exception) -> str:
+    if isinstance(exc, requests.exceptions.HTTPError) and exc.response is not None:
+        body = exc.response.text.strip()
+        if len(body) > 400:
+            body = body[:400] + "..."
+        return f"{exc} | body: {body}"
+    return str(exc)
+
+
+
+def _post_job(base_url: str, *, mode: str, requests_per_day: int,
+              model_name: str | None = None, task_hint: str | None = None,
+              model_file=None, sample_image=None) -> dict[str, Any]:
+    data = {
+        "mode": mode,
+        "requests_per_day": str(int(requests_per_day)),
+    }
+    if task_hint:
+        data["task_hint"] = task_hint
+    if model_name:
+        data["model_name"] = model_name
+
+    files = {}
+    if model_file is not None:
+        files["model_file"] = (model_file.name, model_file.getvalue(), "application/octet-stream")
+    if sample_image is not None:
+        files["sample_image"] = (sample_image.name, sample_image.getvalue(), sample_image.type or "image/jpeg")
+
+    resp = requests.post(
+        _api_url(base_url, "/v1/jobs"),
+        data=data,
+        files=files or None,
+        timeout=60,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+
+def _get_job(base_url: str, job_id: str) -> dict[str, Any]:
+    resp = requests.get(_api_url(base_url, f"/v1/jobs/{job_id}"), timeout=30)
+    resp.raise_for_status()
+    return resp.json()
+
+
+
+def _preview_job(base_url: str, job_id: str, image_file, config: str | None) -> dict[str, Any]:
+    data = {}
+    if config:
+        data["config"] = config
+
+    files = {
+        "image": (image_file.name, image_file.getvalue(), image_file.type or "image/jpeg"),
+    }
+
+    resp = requests.post(
+        _api_url(base_url, f"/v1/jobs/{job_id}/preview"),
+        data=data,
+        files=files,
+        timeout=180,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+
+def _deploy_job(base_url: str, job_id: str, config: str | None = None) -> dict[str, Any]:
+    payload = {"config": config} if config else {}
+    resp = requests.post(
+        _api_url(base_url, f"/v1/jobs/{job_id}/deploy"),
+        json=payload,
+        timeout=120,
+    )
+    resp.raise_for_status()
+    return resp.json()
+
+
+
+def _invoke_deployment(url: str, api_key: str, image_file) -> dict[str, Any]:
+    files = {"image": (image_file.name, image_file.getvalue(), image_file.type or "image/jpeg")}
+    headers = {"x-api-key": api_key}
+    resp = requests.post(url, headers=headers, files=files, timeout=120)
+    resp.raise_for_status()
+    return resp.json()
+
+
 # ---------------------------------------------------------------------------
-# Page config (must be the very first Streamlit call)
+# UI
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="DeployBench", layout="wide")
 
-# ---------------------------------------------------------------------------
-# Sidebar — configuration and dev utilities
-# ---------------------------------------------------------------------------
 with st.sidebar:
     st.header("Settings")
-    mock_mode = st.toggle("Mock data mode", value=False,
-                          help="Use fake results so you can develop the UI without a GPU.")
-    endpoint_url = st.text_input(
-        "Modal endpoint URL",
-        value=_default_endpoint_url(),
-        disabled=mock_mode,
-    )
+    endpoint_url = st.text_input("Modal endpoint URL", value=_default_endpoint_url())
+    st.caption("Use the base API URL. Example: https://<workspace>--deploybench-api-app.modal.run")
     st.divider()
-    st.caption("DeployBench - HackIllinois 2026")
+    st.caption("Cost assumptions: T4 GPU, 30-day month, 1.15 overhead factor")
 
-# ---------------------------------------------------------------------------
-# Mock data (used when mock_mode is True)
-# ---------------------------------------------------------------------------
-_MOCK_RESPONSE = {
-    "model": "yolov8s",
-    "results": [
-        {
-            "config": "FP32 (Baseline)",
-            "avg_latency_ms": 42.1,
-            "p95_latency_ms": 55.3,
-            "fps": 23.8,
-            "peak_memory_mb": 1240.0,
-            "mAP_50": 0.483,
-            "est_monthly_cost": 88.24,
-        },
-        {
-            "config": "FP16 (Half Precision)",
-            "avg_latency_ms": 28.5,
-            "p95_latency_ms": 35.1,
-            "fps": 35.1,
-            "peak_memory_mb": 680.0,
-            "mAP_50": 0.479,
-            "est_monthly_cost": 59.75,
-        },
-        {
-            "config": "INT8 (Quantized)",
-            "error": "quantize_dynamic not supported on YOLO conv layers",
-        },
-        {
-            "config": "ONNX + FP16",
-            "avg_latency_ms": 19.2,
-            "p95_latency_ms": 24.0,
-            "fps": 52.1,
-            "peak_memory_mb": 510.0,
-            "mAP_50": 0.471,
-            "est_monthly_cost": 40.27,
-        },
-    ],
-    "recommendation": {
-        "best_config": "ONNX + FP16",
-        "monthly_savings": 47.97,
-        "accuracy_tradeoff": 0.012,
-        "speedup": 2.19,
-    },
-    "deploy_script": (
-        'import modal\nfrom ultralytics import YOLO\n\n'
-        'app = modal.App("my-yolov8s-deployment")\n# ... (generated script)'
-    ),
-}
-
-# ---------------------------------------------------------------------------
-# Header
-# ---------------------------------------------------------------------------
 st.title("DeployBench")
-st.caption("Find the cheapest way to deploy your vision model in 60 seconds.")
+st.caption("Upload your model, benchmark optimizations in parallel, and deploy a live API.")
 
-# ---------------------------------------------------------------------------
-# Controls
-# ---------------------------------------------------------------------------
-col1, col2 = st.columns([2, 1])
-with col1:
-    model = st.selectbox("Select Model", ["yolov8n", "yolov8s", "yolov8m"])
-with col2:
-    requests_per_day = st.number_input("Daily requests", value=10_000, step=1_000, min_value=1)
+if "active_job_id" not in st.session_state:
+    st.session_state.active_job_id = None
+if "last_job" not in st.session_state:
+    st.session_state.last_job = None
+if "deployment" not in st.session_state:
+    st.session_state.deployment = None
 
-run = st.button("Run Benchmark", type="primary", use_container_width=True)
+base_url = None
+try:
+    base_url = _normalize_base_url(endpoint_url)
+except ValueError as exc:
+    st.warning(str(exc))
 
-# ---------------------------------------------------------------------------
-# Helpers
-# ---------------------------------------------------------------------------
+requests_per_day = st.number_input("Expected requests/day", min_value=1, value=10000, step=1000)
 
-def _safe_get(d: dict, key: str, default=None):
-    """Return d[key] if present, else default."""
-    return d.get(key, default)
+try_tab, upload_tab = st.tabs(["Try It", "Upload Your Model"])
 
-
-def _is_error_result(r: dict) -> bool:
-    return "error" in r
-
-
-def _valid_results(results: list[dict]) -> list[dict]:
-    return [r for r in results if not _is_error_result(r)]
-
-
-def _benchmark_url_candidates(raw_url: str) -> list[str]:
-    """
-    Return one or two endpoint candidates.
-    Accepts either a direct web endpoint URL or a base app URL.
-    """
-    url = raw_url.strip().rstrip("/")
-    if not url or "your-modal-endpoint.modal.run" in url:
-        raise ValueError("Set your real Modal endpoint URL in the sidebar.")
-
-    parsed = urlparse(url)
-    path = parsed.path or ""
-
-    # Modal web-function URLs commonly work at root on a benchmark-specific
-    # subdomain, but some setups use "/benchmark".
-    if path.endswith("/benchmark"):
-        return [url, url[: -len("/benchmark")]]
-    if path and path != "/":
-        return [url]
-    return [url, f"{url}/benchmark"]
-
-
-def _render_metric_cards(results: list[dict]) -> None:
-    cols = st.columns(max(len(results), 1))
-    for i, r in enumerate(results):
-        config = _safe_get(r, "config", f"Config {i+1}")
-        if _is_error_result(r):
-            cols[i].error(f"**{config}**\nFailed: {r['error']}")
-            continue
-        with cols[i]:
-            cost = _safe_get(r, "est_monthly_cost")
-            cost_label = f"${cost}/mo" if cost is not None else "N/A"
-            st.metric(config, cost_label)
-            latency = _safe_get(r, "avg_latency_ms", "?")
-            fps = _safe_get(r, "fps", "?")
-            mAP = _safe_get(r, "mAP_50")
-            mem = _safe_get(r, "peak_memory_mb", "?")
-            st.caption(f"{latency} ms · {fps} FPS")
-            map_str = f"{mAP:.1%}" if mAP is not None else "N/A"
-            st.caption(f"mAP: {map_str} · {mem} MB")
-
-
-def _render_cost_accuracy_chart(valid: list[dict]) -> None:
-    if not valid:
-        st.info("No valid results to chart.")
-        return
-    fig = go.Figure()
-    fig.add_trace(go.Scatter(
-        x=[_safe_get(r, "est_monthly_cost", 0) for r in valid],
-        y=[_safe_get(r, "mAP_50", 0) for r in valid],
-        mode="markers+text",
-        text=[_safe_get(r, "config", "") for r in valid],
-        textposition="top center",
-        marker=dict(size=15, color="#4d96ff"),
-    ))
-    fig.update_layout(
-        xaxis_title="Estimated Monthly Cost ($)",
-        yaxis_title="Accuracy (mAP@50)",
-        height=400,
-        margin=dict(t=20),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def _render_cost_bar_chart(valid: list[dict]) -> None:
-    if not valid:
-        return
-    colors = ["#ff6b6b", "#ffd93d", "#6bcb77", "#4d96ff"]
-    fig = go.Figure(go.Bar(
-        x=[_safe_get(r, "config", f"Config {i}") for i, r in enumerate(valid)],
-        y=[_safe_get(r, "est_monthly_cost", 0) for r in valid],
-        marker_color=colors[: len(valid)],
-    ))
-    fig.update_layout(
-        yaxis_title="Est. Monthly Cost ($)",
-        height=350,
-        margin=dict(t=20),
-    )
-    st.plotly_chart(fig, use_container_width=True)
-
-
-def _render_recommendation(rec: dict | None) -> None:
-    if rec is None:
-        st.warning("No recommendation available (all workers may have failed).")
-        return
-    best = _safe_get(rec, "best_config", "Unknown")
-    savings = _safe_get(rec, "monthly_savings")
-    speedup = _safe_get(rec, "speedup")
-    tradeoff = _safe_get(rec, "accuracy_tradeoff")
-
-    savings_str = f"${savings}/mo" if savings is not None else "N/A"
-    speedup_str = f"{speedup}x faster" if speedup is not None else ""
-    tradeoff_str = f"{tradeoff:.2%} accuracy tradeoff" if tradeoff is not None else ""
-
-    parts = [p for p in [speedup_str, tradeoff_str] if p]
-    detail = ", ".join(parts)
-    msg = f"**Recommendation: {best}** — Saves {savings_str}"
-    if detail:
-        msg += f" ({detail})"
-    st.success(msg)
-
-
-def _render_deploy_script(script: str | None) -> None:
-    if not script:
-        st.info("No deployment script generated.")
-        return
-    st.caption("Copy this script, save as `modal_app.py`, then run `modal deploy modal_app.py`")
-    st.code(script, language="python")
-
-
-# ---------------------------------------------------------------------------
-# Main results section
-# ---------------------------------------------------------------------------
-if run:
-    if mock_mode:
-        data = _MOCK_RESPONSE
-    else:
-        with st.spinner("Spinning up 4 GPU containers on Modal..."):
+with try_tab:
+    st.subheader("Gallery path")
+    gallery_model = st.selectbox("Model", ["yolov8n", "yolov8s", "yolov8m"], key="gallery_model")
+    gallery_sample = st.file_uploader("Optional sample image", type=["jpg", "jpeg", "png"], key="gallery_sample")
+    if st.button("Run Gallery Benchmark", type="primary", use_container_width=True):
+        if not base_url:
+            st.error("Set endpoint URL first.")
+        else:
+            created = None
             try:
-                candidates = _benchmark_url_candidates(endpoint_url)
-                last_http_error = None
-                for benchmark_url in candidates:
-                    resp = requests.post(
-                        benchmark_url,
-                        json={"model": model, "requests_per_day": int(requests_per_day)},
-                        timeout=660,
-                    )
-                    try:
-                        resp.raise_for_status()
-                        data = resp.json()
-                        break
-                    except requests.exceptions.HTTPError as exc:
-                        if exc.response is not None and exc.response.status_code == 404:
-                            last_http_error = exc
-                            continue
-                        raise
-                else:
-                    if last_http_error is not None:
-                        raise last_http_error
-                    raise requests.exceptions.HTTPError("No endpoint URL candidates succeeded.")
-            except ValueError as exc:
-                st.error(str(exc))
-                st.stop()
-            except requests.exceptions.ConnectionError:
-                st.error("Could not connect to the Modal endpoint. Check the URL in the sidebar.")
-                st.stop()
-            except requests.exceptions.Timeout:
-                st.error("Request timed out. The benchmark may still be running — try again.")
-                st.stop()
-            except requests.exceptions.HTTPError as exc:
-                if exc.response is not None and exc.response.status_code == 404:
-                    st.error(
-                        "Endpoint returned 404. In the sidebar, use your deployed Modal URL "
-                        "(base URL or full /benchmark URL)."
-                    )
-                    st.stop()
-                st.error(f"Endpoint returned an error: {exc}")
-                st.stop()
+                created = _post_job(
+                    base_url,
+                    mode="gallery",
+                    requests_per_day=int(requests_per_day),
+                    model_name=gallery_model,
+                    sample_image=gallery_sample,
+                )
             except Exception as exc:  # noqa: BLE001
-                st.error(f"Unexpected error: {exc}")
-                st.stop()
+                st.error(f"Failed to create job: {_format_http_error(exc)}")
 
-    # Validate top-level keys
-    if "results" not in data:
-        st.error("Invalid response from server: missing 'results' key.")
+            if created:
+                st.session_state.active_job_id = created["job_id"]
+                st.session_state.last_job = None
+                st.session_state.deployment = None
+                st.success(f"Job created: {created['job_id']}")
+                try:
+                    _trigger_rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.warning(f"Auto-refresh unavailable: {exc}. Refresh the page manually.")
+
+with upload_tab:
+    st.subheader("Upload path")
+    upload_model = st.file_uploader("Upload .pt model (max 500MB)", type=["pt"], key="upload_model")
+    task_hint = st.selectbox("Task hint (optional)", ["", "detect", "classify", "segment"], index=0)
+    upload_sample = st.file_uploader("Optional sample image", type=["jpg", "jpeg", "png"], key="upload_sample")
+
+    if st.button("Run Upload Benchmark", type="primary", use_container_width=True):
+        if not base_url:
+            st.error("Set endpoint URL first.")
+        elif upload_model is None:
+            st.error("Upload a .pt model first.")
+        else:
+            created = None
+            try:
+                created = _post_job(
+                    base_url,
+                    mode="upload",
+                    requests_per_day=int(requests_per_day),
+                    task_hint=task_hint or None,
+                    model_file=upload_model,
+                    sample_image=upload_sample,
+                )
+            except Exception as exc:  # noqa: BLE001
+                st.error(f"Failed to create job: {_format_http_error(exc)}")
+
+            if created:
+                st.session_state.active_job_id = created["job_id"]
+                st.session_state.last_job = None
+                st.session_state.deployment = None
+                st.success(f"Job created: {created['job_id']}")
+                try:
+                    _trigger_rerun()
+                except Exception as exc:  # noqa: BLE001
+                    st.warning(f"Auto-refresh unavailable: {exc}. Refresh the page manually.")
+
+# ---------------------------------------------------------------------------
+# Active job panel + polling
+# ---------------------------------------------------------------------------
+job_id = st.session_state.active_job_id
+if job_id and base_url:
+    st.divider()
+    st.subheader(f"Live Job: {job_id}")
+
+    try:
+        job = _get_job(base_url, job_id)
+        st.session_state.last_job = job
+    except Exception as exc:  # noqa: BLE001
+        st.error(f"Could not fetch job status: {exc}")
         st.stop()
 
-    results: list[dict] = data["results"]
+    status = job.get("status", "unknown")
+    st.write(f"Status: `{status}`")
 
-    # --- Metric cards ---
-    st.subheader("Results")
-    _render_metric_cards(results)
+    lanes = job.get("lanes", {})
+    lane_cols = st.columns(4)
+    for idx, cfg in enumerate(["FP32", "FP16", "INT8", "ONNX_FP16"]):
+        lane = lanes.get(cfg, {})
+        with lane_cols[idx]:
+            st.markdown(f"**{cfg}**")
+            st.caption(f"state: {lane.get('status', 'unknown')}")
+            if lane.get("status") == "done":
+                st.metric("Latency", f"{lane.get('avg_latency_ms', 'n/a')} ms")
+                st.caption(f"p95: {lane.get('p95_latency_ms', 'n/a')} ms")
+                st.caption(f"FPS: {lane.get('fps', 'n/a')}")
+                st.caption(f"Memory: {lane.get('peak_memory_mb', 'n/a')} MB")
+                st.caption(f"Cost: ${lane.get('est_monthly_cost', 'n/a')}/mo")
+                gpu_avg = lane.get("gpu_util_avg_pct")
+                gpu_p95 = lane.get("gpu_util_p95_pct")
+                gpu_peak = lane.get("gpu_util_peak_pct")
+                samples = lane.get("gpu_monitor_sample_count", 0)
+                if gpu_avg is not None:
+                    st.caption(
+                        f"GPU util avg/p95/peak: {gpu_avg}% / {gpu_p95}% / {gpu_peak}%"
+                    )
+                    st.caption(
+                        f"GPU mem peak: {lane.get('gpu_mem_used_peak_mb', 'n/a')} MB "
+                        f"({lane.get('gpu_mem_used_peak_pct', 'n/a')}%)"
+                    )
+                    st.caption(
+                        f"GPU power avg: {lane.get('gpu_power_avg_w', 'n/a')} W | "
+                        f"samples: {samples}"
+                    )
+                elif samples == 0 and lane.get("gpu_monitor_errors"):
+                    st.caption(
+                        "GPU telemetry unavailable: "
+                        + "; ".join(lane.get("gpu_monitor_errors", [])[:2])
+                    )
+                q_name = lane.get("quality_metric_name") or "quality"
+                q_val = lane.get("quality_metric")
+                if q_val is not None:
+                    st.caption(f"{q_name}: {q_val}")
+            elif lane.get("status") in {"failed", "unsupported"}:
+                st.error(lane.get("error") or "Lane failed")
 
-    valid = _valid_results(results)
+    rec = job.get("recommendation")
+    if rec:
+        st.success(
+            f"Recommendation: {rec.get('best_config')} | "
+            f"Savings: ${rec.get('monthly_savings')} /mo | "
+            f"Speedup: {rec.get('speedup_vs_fp32')}x | "
+            f"Quality tradeoff: {rec.get('quality_tradeoff')} | "
+            f"Confidence: {rec.get('confidence')}"
+        )
+        st.caption(rec.get("decision_reason", ""))
 
-    # --- Charts (only render if we have at least one successful result) ---
-    if valid:
-        st.subheader("Cost vs Accuracy Tradeoff")
-        _render_cost_accuracy_chart(valid)
+    if job.get("errors"):
+        st.warning("Job errors")
+        st.json(job["errors"])
 
-        st.subheader("Monthly Cost Comparison")
-        _render_cost_bar_chart(valid)
+    terminal = status in {"completed", "failed", "incompatible"}
+    if not terminal:
+        st.info("Live race polling every ~1.5 seconds...")
+        time.sleep(1.5)
+        try:
+            _trigger_rerun()
+        except Exception as exc:  # noqa: BLE001
+            st.warning(f"Auto-refresh unavailable: {exc}. Refresh the page manually.")
+
+# ---------------------------------------------------------------------------
+# Completed job actions
+# ---------------------------------------------------------------------------
+job = st.session_state.last_job
+if job and job.get("status") in {"completed", "incompatible", "failed"} and base_url:
+    st.divider()
+    st.subheader("Post-Benchmark Actions")
+
+    if job.get("status") == "completed":
+        done_configs = [
+            cfg
+            for cfg, lane in (job.get("lanes") or {}).items()
+            if lane.get("status") == "done"
+        ]
+
+        with st.expander("Preview outputs", expanded=True):
+            preview_image = st.file_uploader("Upload image for preview", type=["jpg", "jpeg", "png"], key="preview_image")
+            preview_config = st.selectbox(
+                "Preview config",
+                ["(all done configs)"] + done_configs,
+                index=0,
+                key="preview_config",
+            )
+            if st.button("Run Preview", use_container_width=True):
+                if preview_image is None:
+                    st.error("Upload an image first.")
+                else:
+                    try:
+                        cfg = None if preview_config == "(all done configs)" else preview_config
+                        preview = _preview_job(base_url, job["job_id"], preview_image, cfg)
+                        for cfg_name, payload in preview.get("results", {}).items():
+                            st.markdown(f"**{cfg_name}**")
+                            if payload.get("status") in {"failed", "unsupported"}:
+                                st.error(payload.get("error", "Preview failed"))
+                                continue
+                            b64 = payload.get("annotated_image_b64")
+                            if b64:
+                                st.image(f"data:image/png;base64,{b64}", caption=f"{cfg_name} annotated")
+                            st.json(payload.get("outputs", {}))
+                    except Exception as exc:  # noqa: BLE001
+                        st.error(f"Preview failed: {exc}")
+
+        with st.expander("Deploy as API", expanded=True):
+            rec = job.get("recommendation") or {}
+            default_cfg = rec.get("best_config")
+            deploy_config = st.selectbox(
+                "Deploy config",
+                ["(recommended)"] + done_configs,
+                index=0,
+                key="deploy_config",
+            )
+            if st.button("Deploy now", type="primary", use_container_width=True):
+                try:
+                    cfg = None if deploy_config == "(recommended)" else deploy_config
+                    dep = _deploy_job(base_url, job["job_id"], cfg)
+                    st.session_state.deployment = dep
+                    st.success("Deployment created.")
+                except Exception as exc:  # noqa: BLE001
+                    st.error(f"Deploy failed: {exc}")
+
+            dep = st.session_state.deployment
+            if dep:
+                st.code(dep.get("url", ""), language="text")
+                st.code(dep.get("curl_example", ""), language="bash")
+                st.warning("API key (shown once):")
+                st.code(dep.get("api_key_once", ""), language="text")
+
+                probe_image = st.file_uploader("Smoke test deployed API", type=["jpg", "jpeg", "png"], key="probe_image")
+                if st.button("Run deployment smoke test", use_container_width=True):
+                    if probe_image is None:
+                        st.error("Upload test image first.")
+                    else:
+                        try:
+                            output = _invoke_deployment(dep["url"], dep["api_key_once"], probe_image)
+                            st.success("Deployment responded successfully.")
+                            st.json(output)
+                        except Exception as exc:  # noqa: BLE001
+                            st.error(f"Smoke test failed: {exc}")
+
     else:
-        st.warning("All workers failed — no chart data to display.")
-
-    # --- Recommendation ---
-    st.subheader("Recommendation")
-    _render_recommendation(_safe_get(data, "recommendation"))
-
-    # --- Deployment script ---
-    st.subheader("Deploy to Modal")
-    _render_deploy_script(_safe_get(data, "deploy_script"))
+        st.warning("Job did not complete successfully. Review lane errors above.")
