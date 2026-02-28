@@ -7,6 +7,15 @@ estimates and a recommendation, and delegates deploy-script generation.
 
 from utils.cost_estimator import estimate_cost
 from utils.deploy_script import generate_deploy_script
+from typing import Optional
+
+try:
+    from app import benchmark_fp32, benchmark_fp16, benchmark_int8, benchmark_onnx
+except Exception:  # noqa: BLE001
+    benchmark_fp32 = None
+    benchmark_fp16 = None
+    benchmark_int8 = None
+    benchmark_onnx = None
 
 # Human-readable labels that match what each worker sets in result["config"].
 # Used as fallback text when a worker raises before returning its result.
@@ -20,8 +29,8 @@ _CONFIG_LABELS: dict[str, str] = {
 
 def run_all_benchmarks(
     model_name: str,
-    requests_per_day: int,
-    calls_dict: dict,
+    requests_per_day: int = 10000,
+    calls_dict: Optional[dict] = None,
 ) -> dict:
     """
     Collect results from parallel worker spawns and build the final report.
@@ -55,6 +64,18 @@ def run_all_benchmarks(
     Result dict shape (failed worker):
         {"config": str, "error": str}
     """
+    if calls_dict is None:
+        if not all([benchmark_fp32, benchmark_fp16, benchmark_int8, benchmark_onnx]):
+            raise RuntimeError(
+                "Worker functions are unavailable; provide calls_dict explicitly."
+            )
+        calls_dict = {
+            "fp32": benchmark_fp32.spawn(model_name),
+            "fp16": benchmark_fp16.spawn(model_name),
+            "int8": benchmark_int8.spawn(model_name),
+            "onnx": benchmark_onnx.spawn(model_name),
+        }
+
     results: list[dict] = []
 
     for key, call in calls_dict.items():
@@ -69,6 +90,7 @@ def run_all_benchmarks(
             results.append({"config": config_label, "error": str(exc)})
 
     valid = [r for r in results if "error" not in r]
+    errors = [r for r in results if "error" in r]
 
     if not valid:
         return {
@@ -79,6 +101,7 @@ def run_all_benchmarks(
         }
 
     valid.sort(key=lambda r: r["est_monthly_cost"])
+    results = valid + errors
     cheapest = valid[0]
 
     # FP32 is the canonical baseline; fall back to most expensive if it failed.

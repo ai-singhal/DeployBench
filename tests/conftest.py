@@ -1,4 +1,5 @@
 """Shared pytest fixtures and utilities for DeployBench tests."""
+import numpy  # noqa: F401
 import pytest
 
 

@@ -95,7 +95,7 @@ def run_all_benchmarks(model_name: str, requests_per_day: int = 10000) -> dict:
 # ---------------------------------------------------------------------------
 
 @app.function(timeout=660)
-@modal.web_endpoint(method="POST")
+@modal.fastapi_endpoint(method="POST")
 def benchmark(item: dict) -> dict:
     """
     POST /benchmark

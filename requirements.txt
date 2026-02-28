@@ -1,0 +1,14 @@
+modal
+ultralytics
+torch
+torchvision
+onnxruntime-gpu; platform_system != "Darwin"
+onnxruntime; platform_system == "Darwin"
+pycocotools
+opencv-python-headless
+numpy
+Pillow
+streamlit
+requests
+plotly
+pytest

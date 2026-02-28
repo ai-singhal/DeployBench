@@ -3,7 +3,9 @@ COCO prediction formatting and mAP computation using pycocotools.
 """
 
 import contextlib
+import importlib
 import io
+import sys
 
 
 def format_predictions(ultralytics_results, image_id: int, coco_cat_id_map: dict) -> list:
@@ -64,8 +66,16 @@ def compute_mAP(predictions: list, ground_truth: dict) -> float:
     if not predictions:
         return 0.0
 
-    from pycocotools.coco import COCO
-    from pycocotools.cocoeval import COCOeval
+    coco_module = sys.modules.get("pycocotools.coco")
+    cocoeval_module = sys.modules.get("pycocotools.cocoeval")
+
+    if coco_module is None:
+        coco_module = importlib.import_module("pycocotools.coco")
+    if cocoeval_module is None:
+        cocoeval_module = importlib.import_module("pycocotools.cocoeval")
+
+    COCO = coco_module.COCO
+    COCOeval = cocoeval_module.COCOeval
 
     # Build COCO ground truth object from the loaded dict
     coco_gt = COCO()

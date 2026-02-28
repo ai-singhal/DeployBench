@@ -47,10 +47,10 @@ class TestEstimateCostFormula:
         assert estimate_cost(100.0, 10_000) == 4.92
 
     def test_spot_check_50ms_5k_requests(self):
-        """50ms @ 5_000 req/day should cost half of 100ms @ 10_000 req/day."""
+        """50ms @ 5_000 req/day should cost one quarter of 100ms @ 10_000 req/day."""
         cost_half = estimate_cost(50.0, 5_000)
         cost_full = estimate_cost(100.0, 10_000)
-        assert cost_half == cost_full
+        assert cost_half == pytest.approx(cost_full / 4, abs=0.01)
 
 
 class TestEstimateCostReturnType:
