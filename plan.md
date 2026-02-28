@@ -10,7 +10,7 @@ This is the complete technical specification for building DeployBench at HackIll
 
 DeployBench is a web app where you pick a vision model, we benchmark it across 4 optimization configs on real GPUs simultaneously via Modal, and hand you a comparison dashboard + a deploy-ready Modal script.
 
-"Find the cheapest way to deploy your model — in 60 seconds."
+"Find the cheapest way to deploy your model in 60 seconds."
 
 ---
 
@@ -456,7 +456,7 @@ st.set_page_config(page_title="DeployBench", layout="wide")
 # HEADER
 # ============================================
 st.title("DeployBench")
-st.caption("Find the cheapest way to deploy your model — in 60 seconds.")
+st.caption("Find the cheapest way to deploy your model in 60 seconds.")
 
 # ============================================
 # CONTROLS

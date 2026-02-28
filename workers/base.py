@@ -8,6 +8,7 @@ The only thing that differs per worker is how the model is loaded.
 import json
 import os
 import time
+from typing import Optional
 
 DATA_DIR = "/data"
 IMAGE_DIR = os.path.join(DATA_DIR, "coco_val2017")
@@ -42,7 +43,8 @@ def load_data() -> tuple:
 
 def run_benchmark(model, image_paths: list, image_ids: list,
                   ground_truth: dict, coco_cat_id_map: dict,
-                  device: str = "cuda") -> dict:
+                  device: str = "cuda",
+                  predict_kwargs: Optional[dict] = None) -> dict:
     """
     Standard benchmark loop shared by all workers.
 
@@ -60,6 +62,8 @@ def run_benchmark(model, image_paths: list, image_ids: list,
         ground_truth: COCO annotation dict
         coco_cat_id_map: class_name -> COCO category_id mapping
         device: "cuda" or "cpu"
+        predict_kwargs: Optional kwargs forwarded to model(...), e.g.
+            {"half": True, "device": "cuda"}.
 
     Returns:
         dict with keys:
@@ -68,10 +72,11 @@ def run_benchmark(model, image_paths: list, image_ids: list,
     """
     import torch
     from utils.metrics import format_predictions, compute_mAP
+    infer_kwargs = {"verbose": False, **(predict_kwargs or {})}
 
     # Phase 1: Warmup (3 passes, not measured)
     for _ in range(3):
-        model(image_paths[0], verbose=False)
+        model(image_paths[0], **infer_kwargs)
 
     # Phase 2: Reset GPU memory tracking
     if device == "cuda" and torch.cuda.is_available():
@@ -88,7 +93,7 @@ def run_benchmark(model, image_paths: list, image_ids: list,
             torch.cuda.synchronize()
         start = time.perf_counter()
 
-        results = model(img_path, verbose=False)
+        results = model(img_path, **infer_kwargs)
 
         if use_cuda:
             torch.cuda.synchronize()

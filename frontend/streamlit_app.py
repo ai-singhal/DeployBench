@@ -8,6 +8,7 @@ Deploy on Modal: see app.py for the @modal.asgi_app() wrapper.
 import streamlit as st
 import requests
 import plotly.graph_objects as go
+from urllib.parse import urlparse
 
 # ---------------------------------------------------------------------------
 # Page config (must be the very first Streamlit call)
@@ -83,7 +84,7 @@ _MOCK_RESPONSE = {
 # Header
 # ---------------------------------------------------------------------------
 st.title("DeployBench")
-st.caption("Find the cheapest way to deploy your vision model — in 60 seconds.")
+st.caption("Find the cheapest way to deploy your vision model in 60 seconds.")
 
 # ---------------------------------------------------------------------------
 # Controls
@@ -111,6 +112,27 @@ def _is_error_result(r: dict) -> bool:
 
 def _valid_results(results: list[dict]) -> list[dict]:
     return [r for r in results if not _is_error_result(r)]
+
+
+def _benchmark_url_candidates(raw_url: str) -> list[str]:
+    """
+    Return one or two endpoint candidates.
+    Accepts either a direct web endpoint URL or a base app URL.
+    """
+    url = raw_url.strip().rstrip("/")
+    if not url or "your-modal-endpoint.modal.run" in url:
+        raise ValueError("Set your real Modal endpoint URL in the sidebar.")
+
+    parsed = urlparse(url)
+    path = parsed.path or ""
+
+    # Modal web-function URLs commonly work at root on a benchmark-specific
+    # subdomain, but some setups use "/benchmark".
+    if path.endswith("/benchmark"):
+        return [url, url[: -len("/benchmark")]]
+    if path and path != "/":
+        return [url]
+    return [url, f"{url}/benchmark"]
 
 
 def _render_metric_cards(results: list[dict]) -> None:
@@ -210,13 +232,30 @@ if run:
     else:
         with st.spinner("Spinning up 4 GPU containers on Modal..."):
             try:
-                resp = requests.post(
-                    f"{endpoint_url.rstrip('/')}/benchmark",
-                    json={"model": model, "requests_per_day": int(requests_per_day)},
-                    timeout=660,
-                )
-                resp.raise_for_status()
-                data = resp.json()
+                candidates = _benchmark_url_candidates(endpoint_url)
+                last_http_error = None
+                for benchmark_url in candidates:
+                    resp = requests.post(
+                        benchmark_url,
+                        json={"model": model, "requests_per_day": int(requests_per_day)},
+                        timeout=660,
+                    )
+                    try:
+                        resp.raise_for_status()
+                        data = resp.json()
+                        break
+                    except requests.exceptions.HTTPError as exc:
+                        if exc.response is not None and exc.response.status_code == 404:
+                            last_http_error = exc
+                            continue
+                        raise
+                else:
+                    if last_http_error is not None:
+                        raise last_http_error
+                    raise requests.exceptions.HTTPError("No endpoint URL candidates succeeded.")
+            except ValueError as exc:
+                st.error(str(exc))
+                st.stop()
             except requests.exceptions.ConnectionError:
                 st.error("Could not connect to the Modal endpoint. Check the URL in the sidebar.")
                 st.stop()
@@ -224,6 +263,12 @@ if run:
                 st.error("Request timed out. The benchmark may still be running — try again.")
                 st.stop()
             except requests.exceptions.HTTPError as exc:
+                if exc.response is not None and exc.response.status_code == 404:
+                    st.error(
+                        "Endpoint returned 404. In the sidebar, use your deployed Modal URL "
+                        "(base URL or full /benchmark URL)."
+                    )
+                    st.stop()
                 st.error(f"Endpoint returned an error: {exc}")
                 st.stop()
             except Exception as exc:  # noqa: BLE001
