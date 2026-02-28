@@ -5,10 +5,55 @@ Run locally:   streamlit run frontend/streamlit_app.py
 Deploy on Modal: see app.py for the @modal.asgi_app() wrapper.
 """
 
+from __future__ import annotations
+
+import os
+import re
+from pathlib import Path
 import streamlit as st
 import requests
 import plotly.graph_objects as go
 from urllib.parse import urlparse
+
+
+def _detect_modal_workspace() -> str | None:
+    """Infer Modal workspace/login from env or local Modal config."""
+    env_workspace = (
+        os.getenv("MODAL_WORKSPACE")
+        or os.getenv("MODAL_PROFILE")
+        or os.getenv("MODAL_USERNAME")
+    )
+    if env_workspace:
+        return env_workspace.strip()
+
+    config_path = Path.home() / ".modal.toml"
+    if not config_path.exists():
+        return None
+
+    text = config_path.read_text(encoding="utf-8")
+    active_profile_match = re.search(
+        r"(?ms)^\[(?P<name>[^\]]+)\]\s+.*?^active\s*=\s*true\b",
+        text,
+    )
+    if active_profile_match:
+        return active_profile_match.group("name").strip()
+
+    first_profile_match = re.search(r"(?m)^\[([^\]]+)\]", text)
+    if first_profile_match:
+        return first_profile_match.group(1).strip()
+    return None
+
+
+def _default_endpoint_url() -> str:
+    """Return best default endpoint, preferring explicit env override."""
+    explicit_url = os.getenv("DEPLOYBENCH_MODAL_ENDPOINT_URL")
+    if explicit_url:
+        return explicit_url.strip()
+
+    workspace = _detect_modal_workspace()
+    if workspace:
+        return f"https://{workspace}--deploybench-benchmark.modal.run"
+    return "https://your-modal-endpoint.modal.run"
 
 # ---------------------------------------------------------------------------
 # Page config (must be the very first Streamlit call)
@@ -24,7 +69,7 @@ with st.sidebar:
                           help="Use fake results so you can develop the UI without a GPU.")
     endpoint_url = st.text_input(
         "Modal endpoint URL",
-        value="https://your-modal-endpoint.modal.run",
+        value=_default_endpoint_url(),
         disabled=mock_mode,
     )
     st.divider()
